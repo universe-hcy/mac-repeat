@@ -68,5 +68,8 @@ Repeat 本身是 Java 后台加网页界面的键鼠录制回放工具。在 mac
 - 录的是屏幕绝对坐标，窗口移动后点击会偏；界面加载慢时请降低速度或加大等待。
 - 已绑定的快捷键会被全局吞掉，录制里含有它时播放不会传给目标应用；系统保留的快捷键（如 ⌘空格）绑定后不会触发，也检测不到。
 
+## 许可证
+Copyright 2026 universe-hcy。本项目以 [Apache License 2.0](LICENSE) 发布。
+
 ## 致谢
-录制和编译功能来自 [repeats/Repeat](https://github.com/repeats/Repeat)。
+录制和编译功能来自 [repeats/Repeat](https://github.com/repeats/Repeat)（Apache License 2.0）。本仓库不包含 Repeat 的源码和 `Repeat.jar`，只在运行时调用它；`build.sh` 构建时从 jar 中取出 Repeat 的 logo 生成 App 图标，这个图标不包含在仓库里。
