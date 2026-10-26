@@ -103,6 +103,7 @@ enum Step: Equatable {
 /// has no code for (right-hand modifiers, Fn, …) get app-private codes `privateBase + mac key code`.
 enum Keys {
     static let privateBase = 0x10000
+    static let inputSwitch = privateBase + 0x200
 
     /// (Java or private code, macOS virtual key code, display name). The first entry of a mac
     /// code is what recording produces; later ones (Help) are accepted for playback only.
@@ -124,6 +125,8 @@ enum Keys {
             (privateBase + 60, 60, "右 Shift"), (privateBase + 62, 62, "右 Control"),
             (privateBase + 61, 61, "右 Option"), (privateBase + 54, 54, "右 Command"),
             (privateBase + 63, 63, "Fn"),
+            // Not a key: what CapsLock does with "use Caps Lock to switch to and from ABC" (see Player).
+            (inputSwitch, 57, "切换输入法"),
         ]
         let letters: [CGKeyCode] = [0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6]
         for (i, mac) in letters.enumerated() { rows.append((65 + i, mac, String(UnicodeScalar(UInt8(65 + i))))) }
@@ -173,7 +176,7 @@ enum Keys {
         let generic = [privateBase + 60: 16, privateBase + 62: 17, privateBase + 61: 18, privateBase + 54: 157,
                        privateBase + 76: 10, privateBase + 81: 61]
         if let base = generic[code] { return base }
-        return privateMac(code) == nil ? code : nil
+        return privateMac(code) == nil && code != inputSwitch ? code : nil
     }
 
     /// Modifier keys (mac code) → their flag and device-dependent bit (NX_DEVICE*KEYMASK).
@@ -660,6 +663,10 @@ final class Player {
             guard let button = Self.button(mask) else { return }
             heldButtons.removeAll { $0 == button }
             postMouse(button == .left ? .leftMouseUp : button == .right ? .rightMouseUp : .otherMouseUp, button: button)
+        case .keyPress(let key) where key == Keys.inputSwitch:
+            DispatchQueue.main.sync { InputSource.toggleABC() }
+        case .keyRelease(let key) where key == Keys.inputSwitch:
+            break
         case .keyPress(let key):
             guard let code = Keys.macCode(key) else { return }
             if !heldKeys.contains(code) { heldKeys.append(code) }
@@ -713,6 +720,39 @@ final class Player {
     }
 }
 
+/// Synthesized CapsLock presses never switch input sources, so the "切换输入法" step does what
+/// "use Caps Lock to switch to and from ABC" does: ABC ↔ the last other keyboard input source.
+enum InputSource {
+    private static let abc = "com.apple.keylayout.ABC"
+    private static var previous: String?
+
+    private static func id(_ source: TISInputSource) -> String {
+        guard let value = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return "" }
+        return Unmanaged<CFString>.fromOpaque(value).takeUnretainedValue() as String
+    }
+
+    /// Call on the main thread.
+    static func toggleABC() {
+        let filter = [kTISPropertyInputSourceIsSelectCapable: true,
+                      kTISPropertyInputSourceCategory: kTISCategoryKeyboardInputSource!] as CFDictionary
+        guard let sources = TISCreateInputSourceList(filter, false)?.takeRetainedValue() as? [TISInputSource],
+              !sources.isEmpty else { return }
+        let ids = sources.map(id)
+        let current = id(TISCopyCurrentKeyboardInputSource().takeRetainedValue())
+        let target: String
+        if current == abc {
+            target = previous.flatMap { ids.contains($0) ? $0 : nil } ?? ids.first { $0 != abc } ?? abc
+        } else if ids.contains(abc) {
+            previous = current
+            target = abc
+        } else {
+            // No ABC enabled: switch to the next input source instead.
+            target = ids[((ids.firstIndex(of: current) ?? -1) + 1) % ids.count]
+        }
+        if target != current, let index = ids.firstIndex(of: target) { TISSelectInputSource(sources[index]) }
+    }
+}
+
 /// Records the keyboard and mouse drags with a listen-only event tap, enabled only while
 /// recording. Repeat's own hook misses right Control, Fn and CapsLock presses, and drag moves.
 /// Mouse presses/releases are recorded only to align the two recordings' clocks.
@@ -721,6 +761,8 @@ final class KeyRecorder {
     private let lock = NSLock()
     private var events: [(time: Date, step: Step)] = []
     private var capsOn = false
+    /// When CapsLock last turned on, while that may still be an input-source switch.
+    private var capsOnAt: Date?
     /// When capturing started; nil when not capturing.
     private(set) var capturingSince: Date?
 
@@ -792,7 +834,17 @@ final class KeyRecorder {
                 let on = event.flags.contains(.maskAlphaShift)
                 guard on != capsOn else { return }
                 capsOn = on
-                events += [(now, .keyPress(key: code)), (now, .keyRelease(key: code))]
+                // With "use Caps Lock to switch to and from ABC", a short press turns Caps Lock
+                // on and the system turns it right back off: one input-source switch, not two taps.
+                let tap: [Step] = [.keyPress(key: code), .keyRelease(key: code)]
+                if !on, let at = capsOnAt, now.timeIntervalSince(at) < 0.5, events.suffix(2).map(\.step) == tap {
+                    events.removeLast(2)
+                    events += [(at, .keyPress(key: Keys.inputSwitch)), (at, .keyRelease(key: Keys.inputSwitch))]
+                    capsOnAt = nil
+                    return
+                }
+                capsOnAt = on ? now : nil
+                events += tap.map { (now, $0) }
             } else if let down = Self.isDown(mac, flags: event.flags) {
                 events.append((now, down ? .keyPress(key: code) : .keyRelease(key: code)))
             }
