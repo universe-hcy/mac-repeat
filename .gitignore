@@ -1,0 +1,6 @@
+# 本地源码备份
+*.bak*
+# 编译产物
+/Repeat
+*.app/
+.DS_Store
