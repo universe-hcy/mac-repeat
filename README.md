@@ -10,6 +10,7 @@ Repeat 本身是 Java 后台加网页界面的键鼠录制回放工具。在 mac
 |---|---|
 | `main.swift` | App 全部源码 |
 | `build.sh` | 编译出 `~/Applications/Repeat.app`，签名，注册 `.repeat` 文档类型 |
+| `icon.swift` | 画 1024×1024 的 App 图标，由 `build.sh` 调用 |
 | `TODO.md` | 开发记录：现状、架构、待办、测试方法 |
 
 ## 构建与运行
@@ -43,8 +44,10 @@ Repeat 本身是 Java 后台加网页界面的键鼠录制回放工具。在 mac
 
 ### 录制：清理和补全
 - 录制仍由 Repeat 完成（F9 开始/停止），停止后通过它的 manual 编译器导出步骤。
-- App 用自己的键盘事件 tap（只在录制期间启用）重新录键盘，替换 Repeat 录到的按键，保留 Repeat 的鼠标步骤；两边的时间轴用共同按键的时间差中位数对齐。这样能录到右侧修饰键、Fn、CapsLock、F13–F20、小键盘等 Repeat 录不到的键。
+- App 用自己的事件 tap（只在录制期间启用）重新录键盘，替换 Repeat 录到的按键，保留 Repeat 的鼠标步骤；两边的时间轴用共同的按键和鼠标按键事件的时间差中位数对齐。这样能录到右侧修饰键、Fn、CapsLock、F13–F20、小键盘等 Repeat 录不到的键。
+- 补录拖拽：Repeat 只记录鼠标移动事件，不记录 macOS 按住鼠标移动时的 dragged 事件，拖拽会变成原地点击。App 的 tap 记录拖拽轨迹并合并进录制。
 - 录完自动清理：去掉 F9/F10 和已绑定的快捷键；修正左键松开被记成右键；去掉不成对的松开；裁掉停止录制的那次点击和之前的鼠标轨迹；末尾补齐所有仍按住的键。
+- 「只录点击」选项：去掉鼠标移动轨迹，只保留每次按下、松开前的位置和拖拽过程，总时长不变。不改 Repeat 自己的 `record-mouse-click-only` 设置。
 
 ### 文件格式：中文 `.repeat`
 - 每行一句中文，可直接编辑，例如：
@@ -72,4 +75,4 @@ Repeat 本身是 Java 后台加网页界面的键鼠录制回放工具。在 mac
 Copyright 2026 universe-hcy。本项目以 [Apache License 2.0](LICENSE) 发布。
 
 ## 致谢
-录制和编译功能来自 [repeats/Repeat](https://github.com/repeats/Repeat)（Apache License 2.0）。本仓库不包含 Repeat 的源码和 `Repeat.jar`，只在运行时调用它；`build.sh` 构建时从 jar 中取出 Repeat 的 logo 生成 App 图标，这个图标不包含在仓库里。
+录制和编译功能来自 [repeats/Repeat](https://github.com/repeats/Repeat)（Apache License 2.0）。本仓库不包含 Repeat 的源码和 `Repeat.jar`，只在运行时调用它。App 图标由 `icon.swift` 自行绘制（SF Symbol「repeat」），不使用 Repeat 的 logo。

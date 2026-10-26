@@ -403,42 +403,55 @@ enum RecordingCleaner {
         return mergeDelays(result)
     }
 
-    /// Replaces the key steps of Repeat's recording with the ones this app recorded itself
-    /// (`keys`: ms since the recording started by this app's clock). Repeat's hook misses right
+    /// Replaces the key steps of Repeat's recording with the ones this app recorded itself and
+    /// adds the drag moves Repeat never records (`own`: ms since the recording started by this
+    /// app's clock; mouse presses/releases in it only mark times). Repeat's hook misses right
     /// Control, Fn and CapsLock presses. The two clocks are aligned by the median offset between
-    /// key events both saw.
-    static func replacingKeys(in steps: [Step], with keys: [(ms: Int, step: Step)]) -> [Step] {
+    /// key and mouse-button events both saw.
+    static func replacingKeys(in steps: [Step], with own: [(ms: Int, step: Step)]) -> [Step] {
         var timed: [(ms: Int, step: Step)] = []
-        var repeatKeys: [(ms: Int, step: Step)] = []
+        var repeatAnchors: [(ms: Int, step: Step)] = []
         var time = 0
         for step in steps {
             switch step {
             case .delay(let ms): time += ms
-            case .keyPress, .keyRelease: repeatKeys.append((time, step))
+            case .keyPress, .keyRelease: repeatAnchors.append((time, step))
+            case .mousePress, .mouseRelease:
+                timed.append((time, step))
+                repeatAnchors.append((time, anchor(step)!))
             default: timed.append((time, step))
             }
         }
 
-        func repeatView(_ step: Step) -> Step? {
+        /// How Repeat would have recorded one of this app's events; nil for moves.
+        func anchor(_ step: Step) -> Step? {
             switch step {
             case .keyPress(let k): return Keys.repeatCode(k).map { .keyPress(key: $0) }
             case .keyRelease(let k): return Keys.repeatCode(k).map { .keyRelease(key: $0) }
+            // Repeat records releases with the wrong mask: compare buttons by kind only.
+            case .mousePress: return .mousePress(mask: 0)
+            case .mouseRelease: return .mouseRelease(mask: 0)
             default: return nil
             }
         }
+        let ownAnchors = own.compactMap { event in anchor(event.step).map { (ms: event.ms, step: $0) } }
         var offsets: [Int] = []
         var next = 0
-        for event in repeatKeys {
-            guard let found = keys[next...].prefix(20).firstIndex(where: {
-                repeatView($0.step) == event.step && abs($0.ms - event.ms) < 2000
+        for event in repeatAnchors {
+            guard let found = ownAnchors[next...].prefix(20).firstIndex(where: {
+                $0.step == event.step && abs($0.ms - event.ms) < 2000
             }) else { continue }
-            offsets.append(keys[found].ms - event.ms)
+            offsets.append(ownAnchors[found].ms - event.ms)
             next = found + 1
         }
         let offset = offsets.isEmpty ? 0 : offsets.sorted()[offsets.count / 2]
 
+        // Mouse buttons come from Repeat's recording; this app's are only time marks.
+        let added = own.filter {
+            switch $0.step { case .mousePress, .mouseRelease: return false; default: return true }
+        }
         // Stable sort: on equal times Repeat's steps (e.g. a click) stay before the keys.
-        let merged = (timed + keys.map { (max(0, $0.ms - offset), $0.step) })
+        let merged = (timed + added.map { (max(0, $0.ms - offset), $0.step) })
             .enumerated().sorted { ($0.element.ms, $0.offset) < ($1.element.ms, $1.offset) }.map(\.element)
         var result: [Step] = []
         time = 0
@@ -464,6 +477,28 @@ enum RecordingCleaner {
             }
         }
         return (mergeDelays(converted), unsupported)
+    }
+
+    /// Drops the pointer's path, keeping only what clicks need: the last move before each button
+    /// press/release (where it happens) and every move while a button is held (drags). The
+    /// delays of dropped moves are merged, so the total duration stays the same.
+    static func clicksOnly(_ steps: [Step]) -> [Step] {
+        var keep = Set<Int>()
+        var lastMove: Int?
+        var held = 0
+        for (index, step) in steps.enumerated() {
+            switch step {
+            case .move:
+                if held > 0 { keep.insert(index) } else { lastMove = index }
+            case .mousePress, .mouseRelease:
+                if let lastMove { keep.insert(lastMove) }
+                lastMove = nil
+                if case .mousePress = step { held += 1 } else { held = max(0, held - 1) }
+            default:
+                break
+            }
+        }
+        return mergeDelays(steps.enumerated().filter { !$0.element.isMove || keep.contains($0.offset) }.map(\.element))
     }
 
     /// Drops presses of bound hotkeys (they trigger playback, not content) and the modifiers
@@ -678,8 +713,9 @@ final class Player {
     }
 }
 
-/// Records the keyboard with a listen-only event tap, enabled only while recording. Repeat's
-/// own hook misses right Control, Fn and CapsLock presses.
+/// Records the keyboard and mouse drags with a listen-only event tap, enabled only while
+/// recording. Repeat's own hook misses right Control, Fn and CapsLock presses, and drag moves.
+/// Mouse presses/releases are recorded only to align the two recordings' clocks.
 final class KeyRecorder {
     private var tap: CFMachPort?
     private let lock = NSLock()
@@ -694,7 +730,9 @@ final class KeyRecorder {
     @discardableResult
     func install() -> Bool {
         if tap != nil { return true }
-        let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged]
+        let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged, .leftMouseDragged, .rightMouseDragged,
+                                    .otherMouseDragged, .leftMouseDown, .leftMouseUp, .rightMouseDown,
+                                    .rightMouseUp, .otherMouseDown, .otherMouseUp]
         let mask = types.reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly, eventsOfInterest: mask,
@@ -758,6 +796,12 @@ final class KeyRecorder {
             } else if let down = Self.isDown(mac, flags: event.flags) {
                 events.append((now, down ? .keyPress(key: code) : .keyRelease(key: code)))
             }
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            events.append((now, .move(x: Int(event.location.x.rounded()), y: Int(event.location.y.rounded()))))
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            events.append((now, .mousePress(mask: 0)))
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            events.append((now, .mouseRelease(mask: 0)))
         default: break
         }
     }
@@ -1061,6 +1105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKUIDe
     private let countField = NSTextField()
     private let countStepper = NSStepper()
     private let speedPopup = NSPopUpButton()
+    private let clicksOnlyCheckbox = NSButton(checkboxWithTitle: "只录点击", target: nil, action: nil)
     private let recordingTitle = NSTextField(labelWithString: "")
     private let recordingSummary = NSTextField(labelWithString: "")
     private var stepsView: NSTextView!
@@ -1412,9 +1457,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKUIDe
             case .success(var raw):
                 if let keys { raw = RecordingCleaner.replacingKeys(in: raw, with: keys) }
                 raw = RecordingCleaner.removingHotkeys(raw, self.bindings.map(\.hotkey))
-                let steps = RecordingCleaner.clean(raw, cutoffMs: cutoff, trimTrailingMoves: stopAt != nil)
+                var steps = RecordingCleaner.clean(raw, cutoffMs: cutoff, trimTrailingMoves: stopAt != nil)
+                if self.clicksOnlyCheckbox.state == .on { steps = RecordingCleaner.clicksOnly(steps) }
                 guard steps.contains(where: { !$0.isDelay }) else {
-                    return self.info("这次录制没有捕获到任何操作。")
+                    let hint = self.clicksOnlyCheckbox.state == .on ? "（已勾选「只录点击」，鼠标移动不会保留）" : ""
+                    return self.info("这次录制没有捕获到任何操作\(hint)。")
                 }
                 self.current = Recording(steps: steps, name: nil, url: nil, saved: false)
                 self.showCurrent()
@@ -1823,6 +1870,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKUIDe
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
     }
 
+    @objc private func clicksOnlyChanged() {
+        UserDefaults.standard.set(clicksOnlyCheckbox.state == .on, forKey: "clicksOnly")
+    }
+
     @objc private func countStepped() { countField.integerValue = countStepper.integerValue }
 
     @objc private func countEdited() {
@@ -1968,7 +2019,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKUIDe
             if speed == (savedSpeed == 0 ? 1 : savedSpeed) { speedPopup.select(speedPopup.lastItem) }
         }
 
-        let controls = NSStackView(views: [recordButton, playButton, spacer(),
+        clicksOnlyCheckbox.state = defaults.bool(forKey: "clicksOnly") ? .on : .off
+        clicksOnlyCheckbox.target = self
+        clicksOnlyCheckbox.action = #selector(clicksOnlyChanged)
+        clicksOnlyCheckbox.toolTip = "录完去掉鼠标移动轨迹，只保留点击和拖拽时的位置；总时长不变。对下一次录制生效。"
+        let controls = NSStackView(views: [recordButton, playButton, clicksOnlyCheckbox, spacer(),
                                            label("次数"), countField, countStepper, label("速度"), speedPopup])
         controls.spacing = 8
 
@@ -2022,12 +2077,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, WKUIDe
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
         ])
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 540),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 540),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Repeat"
         window.contentView = content
-        window.contentMinSize = NSSize(width: 580, height: 420)
+        window.contentMinSize = NSSize(width: 660, height: 420)
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("RepeatSimpleWindow")
         if !window.setFrameUsingName("RepeatSimpleWindow") { window.center() }

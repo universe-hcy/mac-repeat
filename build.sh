@@ -2,7 +2,6 @@
 # Builds Repeat.app into ~/Applications (rerun after editing main.swift).
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
-JAR="$SRC/../Repeat.jar"
 APP="$HOME/Applications/Repeat.app"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -12,13 +11,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O -target arm64-apple-macos13 -o "$APP/Contents/MacOS/Repeat" "$SRC/main.swift"
 
-# Icon: upscale Repeat's own web UI logo into an .icns.
-unzip -p "$JAR" staticContent/webui/static/img/new_logo.png > "$WORK/logo.png"
+# Icon: draw it at 1024×1024 (icon.swift), then scale down into an .icns.
+swift "$SRC/icon.swift" "$WORK/icon.png"
 ICONSET="$WORK/Repeat.iconset"
 mkdir "$ICONSET"
 for s in 16 32 128 256 512; do
-  sips -z $s $s "$WORK/logo.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  sips -z $((s*2)) $((s*2)) "$WORK/logo.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  sips -z $s $s "$WORK/icon.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s*2)) $((s*2)) "$WORK/icon.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Repeat.icns"
 

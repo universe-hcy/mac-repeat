@@ -15,6 +15,7 @@
 | `~/Applications/Repeat/RepeatApp/main.swift.bak-before-todoB` | 做待办 B 之前的源码备份（目录不是 git 仓库） |
 | `~/Applications/Repeat/hotkeys.json` | 快捷键绑定列表（待办 B） |
 | `~/Applications/Repeat/RepeatApp/build.sh` | 编译出 `~/Applications/Repeat.app`：签名、注册 `.repeat` 文档类型 |
+| `~/Applications/Repeat/RepeatApp/icon.swift` | 画 1024×1024 图标（`swift icon.swift out.png`），build.sh 调用 |
 | `~/Documents/Repeat 录制/` | 默认的录制文件目录（`.repeat`） |
 
 构建：`cd ~/Applications/Repeat/RepeatApp && ./build.sh`。构建前先退出 App（`osascript -e 'quit app "Repeat"'`），等 `pgrep -f "Repeat.jar|Repeat.app/Contents"` 没有输出再继续。
@@ -107,11 +108,16 @@ App 的 bundle id 是 `local.repeat.app`，用稳定的签名要求做 ad-hoc �
    - 重启 App 后绑定仍然有效。
 
 ### 待办 C：小问题
-1. **只录点击的选项**：在主窗口加一个复选框「只录点击，不录鼠标轨迹」（Repeat 原本有 `record-mouse-click-only` 设置，但不建议改 Repeat 的设置）。在 App 里清理即可：删掉 `.move`，但保留每次鼠标按下、松开之前的最后一个 `.move`（用来定位）。被删掉的移动之间的 `.delay` 要合并，保证总时长不变。
+1. ✅（2026-10-26）`RecordingCleaner.clicksOnly` + 主窗口复选框「只录点击」（UserDefaults `clicksOnly`，对下一次录制生效，在 `clean` 之后执行）。按住鼠标期间的移动全部保留。单元测试通过；端到端验证通过（2026-10-26：鼠标轨迹去掉，点击前位置保留，时长不变），但发现下面的 C4。原始需求：
+   **只录点击的选项**：在主窗口加一个复选框「只录点击，不录鼠标轨迹」（Repeat 原本有 `record-mouse-click-only` 设置，但不建议改 Repeat 的设置）。在 App 里清理即可：删掉 `.move`，但保留每次鼠标按下、松开之前的最后一个 `.move`（用来定位）。被删掉的移动之间的 `.delay` 要合并，保证总时长不变。
    - 拖拽（按下和松开之间的移动）要保留，至少保留按下和松开时的位置。
    - 显示：`RecordingFormat.timeline` 已经会把连续移动合成一行。
-2. **App 图标会糊**：现在是把 60×60 的 logo 放大生成的。在 `build.sh` 里改为用 Swift 或 Core Graphics 脚本画一个 1024×1024 的图标（例如圆角矩形背景加 SF Symbol「record.circle」或「repeat」），再用 `sips` 缩放出 iconset。
+2. ✅（2026-10-26）`icon.swift` 画图标（蓝紫渐变圆角矩形 + 白色 SF Symbol「repeat」+ 红色录制圆点），build.sh 不再依赖 jar 里的 logo。原始需求：
+   **App 图标会糊**：现在是把 60×60 的 logo 放大生成的。在 `build.sh` 里改为用 Swift 或 Core Graphics 脚本画一个 1024×1024 的图标（例如圆角矩形背景加 SF Symbol「record.circle」或「repeat」），再用 `sips` 缩放出 iconset。
 3. ~~任务名不能用中文~~：待办 B 完成后任务功能已降级为「不推荐」，这一项不做（仍用拼音绕过）。
+4. ✅（2026-10-26 已修）`KeyRecorder` 的 tap 增加 dragged 事件（记成 `.move`）和鼠标按下/松开（只作对齐用的时间标记）；`replacingKeys` 用按键和鼠标按键一起对齐两边时钟，只在非移动事件之间找匹配，再把拖拽移动合并进录制。验收（注入事件，TextEdit）：拖选 "abcdefghij klmno"，取消选择后 F10 播放，选中内容完全相同；勾选「只录点击」时拖拽轨迹保留。原始问题：
+   **拖拽录不到（上游问题，与「只录点击」无关）**：Repeat 的录制器只处理鼠标移动事件，macOS 上按住鼠标移动发出的是 dragged 事件（`leftMouseDragged` 等），Repeat 不记录（jar 里 `core/`、`globalListener/` 都没有 Dragged 相关代码）。实测注入一次从 (500,400) 拖到 (600,420)：原始录制只有按下和松开，中间没有任何移动，松开时的位置也丢了，播放时变成在原地点一下。
+   修法：在 `KeyRecorder` 的 tap 里加上 `leftMouseDragged/rightMouseDragged/otherMouseDragged`，记成 `.move`，像按键一样按时间合并进录制（`replacingKeys` 的合并逻辑可复用）。`Player` 在按住鼠标时已经会发送 dragged 事件，不用改。
 
 ### 已知限制（不属于 bug，必要时在界面或文档里说明）
 App 的播放器在系统层面模拟键盘鼠标，对大多数 App 都有效。但下面这些情况无能为力或需要用户配合：
